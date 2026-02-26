@@ -7,6 +7,7 @@ import asyncio
 from pathlib import Path
 from typing import List, Union
 from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 from datetime import datetime, timedelta
 import time
@@ -351,30 +352,108 @@ class ResumenWindow(QDialog):
         layout.addWidget(btn_cerrar)
 
 
-# VENTANA DE HISTORIAL
+# VENTANA DE HISTORIAL (VERSIÓN MEJORADA CON DESCARGA CSV)
 
 class HistorialWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("📋 Historial de Guías Procesadas")
-        self.setMinimumSize(900, 500)
+        self.setMinimumSize(1000, 600)
         self.setModal(True)
         
+        # Layout principal
         layout = QVBoxLayout(self)
         
-        # Título
-        titulo = QLabel("📊 GUÍAS PROCESADAS")
-        titulo.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(titulo)
+        # Toolbar con filtros
+        toolbar = QHBoxLayout()
         
-        # Tabla con 5 columnas
+        # Título con contador
+        self.titulo_label = QLabel("📊 GUÍAS PROCESADAS")
+        self.titulo_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        toolbar.addWidget(self.titulo_label)
+        
+        toolbar.addStretch()
+        
+        # Filtro por estado
+        toolbar.addWidget(QLabel("Filtrar:"))
+        self.filtro_combo = QComboBox()
+        self.filtro_combo.addItems(["Todos", "✅ Exitosas", "📦 ENT", "❌ Errores", "⚠️ Advertencias"])
+        self.filtro_combo.currentTextChanged.connect(self.aplicar_filtro)
+        toolbar.addWidget(self.filtro_combo)
+        
+        # Botón de limpiar filtros
+        self.btn_limpiar = QPushButton("🗑️ Limpiar filtros")
+        self.btn_limpiar.clicked.connect(self.limpiar_filtros)
+        self.btn_limpiar.setStyleSheet("""
+            QPushButton {
+                background-color: #95a5a6;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+            QPushButton:hover { background-color: #7f8c8d; }
+        """)
+        toolbar.addWidget(self.btn_limpiar)
+        
+        # Botón de exportar CSV (MEJORADO)
+        self.btn_exportar_csv = QPushButton("📥 EXPORTAR CSV")
+        self.btn_exportar_csv.clicked.connect(self.exportar_csv)
+        self.btn_exportar_csv.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                font-weight: bold;
+                padding: 8px 20px;
+                border-radius: 5px;
+                font-size: 11pt;
+                min-width: 150px;
+            }
+            QPushButton:hover {
+                background-color: #2ecc71;
+            }
+        """)
+        toolbar.addWidget(self.btn_exportar_csv)
+        
+        # Botón de exportar Excel
+        self.btn_exportar_excel = QPushButton("📊 EXPORTAR EXCEL")
+        self.btn_exportar_excel.clicked.connect(self.exportar_excel)
+        self.btn_exportar_excel.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                font-weight: bold;
+                padding: 8px 20px;
+                border-radius: 5px;
+                font-size: 11pt;
+                min-width: 150px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        toolbar.addWidget(self.btn_exportar_excel)
+        
+        layout.addLayout(toolbar)
+        
+        # Tabla
         self.tabla = QTableWidget()
         self.tabla.setColumnCount(5)
         self.tabla.setHorizontalHeaderLabels(["Guía", "Estado", "Resultado", "Navegador", "Fecha/Hora"])
-        self.tabla.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tabla.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.tabla.setAlternatingRowColors(True)
+        self.tabla.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tabla.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        
+        # Conectar señales
+        self.tabla.itemDoubleClicked.connect(self.copiar_guia)
+        self.tabla.horizontalHeader().sectionClicked.connect(self.ordenar_por_columna)
+        
         layout.addWidget(self.tabla)
+        
+        # Barra de estado
+        self.status_bar = QLabel("Listo")
+        self.status_bar.setStyleSheet("color: #7f8c8d; padding: 5px;")
+        layout.addWidget(self.status_bar)
         
         # Botón cerrar
         btn_cerrar = QPushButton("CERRAR")
@@ -391,37 +470,473 @@ class HistorialWindow(QDialog):
         """)
         btn_cerrar.clicked.connect(self.accept)
         layout.addWidget(btn_cerrar)
-    
+        
+        # Variables internas
+        self.datos_completos = []  # Todos los datos originales
+        self.datos_filtrados = []   # Datos después de aplicar filtros
+        self.columna_orden = 4      # Por fecha
+        self.orden_ascendente = False
+        self.filtro_actual = "Todos"
+        self.carpeta_descargas = obtener_carpeta_descargas()
+
     def actualizar_historial(self, datos):
         """Actualiza la tabla con los datos del historial"""
-        self.tabla.setRowCount(len(datos))
-        for i, (guia, estado, resultado, nav, fecha) in enumerate(datos):
-            self.tabla.setItem(i, 0, QTableWidgetItem(guia))
+        try:
+            # Guardar copia de los datos originales
+            self.datos_completos = datos.copy()
+            self.datos_filtrados = datos.copy()
             
-            item_estado = QTableWidgetItem(estado)
+            # Aplicar filtro actual si existe
+            self._aplicar_filtro_actual()
+            
+            # Actualizar estadísticas y vista
+            self._actualizar_vista()
+            
+        except Exception as e:
+            self.status_bar.setText(f"❌ Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _actualizar_vista(self):
+        """Actualiza la vista con los datos filtrados"""
+        # Ordenar por fecha (más reciente primero)
+        datos_ordenados = sorted(self.datos_filtrados, key=lambda x: x[4], reverse=True)
+        
+        self.tabla.setRowCount(len(datos_ordenados))
+        self.tabla.setSortingEnabled(False)
+        
+        # Actualizar estadísticas en el título
+        stats = self._calcular_estadisticas(self.datos_completos)
+        stats_filtradas = self._calcular_estadisticas(self.datos_filtrados)
+        
+        titulo = f"📊 GUÍAS PROCESADAS (Total: {len(self.datos_completos)}"
+        titulo += f" | ✅ {stats['exitosas']}"
+        titulo += f" | 📦 {stats['ent']}"
+        titulo += f" | ❌ {stats['errores']}"
+        titulo += f" | ⚠️ {stats['advertencias']})"
+        
+        if len(self.datos_filtrados) != len(self.datos_completos):
+            titulo += f" [Mostrando {len(self.datos_filtrados)}]"
+        
+        self.titulo_label.setText(titulo)
+        
+        # Agregar filas
+        for i, (guia, estado, resultado, nav, fecha) in enumerate(datos_ordenados):
+            self._agregar_fila(i, guia, estado, resultado, nav, fecha)
+        
+        # Ajustar columnas
+        self._ajustar_columnas()
+        
+        # Habilitar ordenamiento
+        self.tabla.setSortingEnabled(True)
+        
+        # Actualizar barra de estado
+        if len(self.datos_filtrados) == len(self.datos_completos):
+            self.status_bar.setText(f"✅ Mostrando todos los registros ({len(self.datos_completos)})")
+        else:
+            self.status_bar.setText(f"🔍 Mostrando {len(self.datos_filtrados)} de {len(self.datos_completos)} registros (filtro: {self.filtro_actual})")
+
+    def _aplicar_filtro_actual(self):
+        """Aplica el filtro actual a los datos completos"""
+        if self.filtro_actual == "Todos":
+            self.datos_filtrados = self.datos_completos.copy()
+            return
+        
+        # Mapear filtro a strings de estado
+        mapa_filtro = {
+            "✅ Exitosas": "✅",
+            "📦 ENT": "📦",
+            "❌ Errores": "❌",
+            "⚠️ Advertencias": "⚠️"
+        }
+        
+        estado_filtro = mapa_filtro.get(self.filtro_actual, "")
+        self.datos_filtrados = [d for d in self.datos_completos if estado_filtro in d[1]]
+
+    def aplicar_filtro(self, filtro):
+        """Aplica filtro por estado"""
+        if not hasattr(self, 'datos_completos') or not self.datos_completos:
+            self.status_bar.setText("⚠️ No hay datos para filtrar")
+            return
+        
+        # Guardar filtro actual
+        self.filtro_actual = filtro
+        
+        # Aplicar filtro
+        self._aplicar_filtro_actual()
+        
+        # Actualizar vista
+        self._actualizar_vista()
+
+    def limpiar_filtros(self):
+        """Limpia todos los filtros aplicados"""
+        self.filtro_combo.setCurrentText("Todos")
+        self.filtro_actual = "Todos"
+        self.datos_filtrados = self.datos_completos.copy()
+        self._actualizar_vista()
+        self.status_bar.setText("✅ Filtros limpiados")
+
+    def _agregar_fila(self, fila, guia, estado, resultado, nav, fecha):
+        """Agrega una fila con formato mejorado"""
+        
+        # Columna 0: Guía
+        item_guia = QTableWidgetItem(guia)
+        item_guia.setToolTip(f"Haz doble clic para copiar: {guia}")
+        item_guia.setData(Qt.ItemDataRole.UserRole, guia)
+        self.tabla.setItem(fila, 0, item_guia)
+        
+        # Columna 1: Estado
+        item_estado = QTableWidgetItem(estado)
+        config_estado = self._get_estado_config(estado)
+        item_estado.setForeground(QColor(config_estado['color']))
+        item_estado.setBackground(QColor(config_estado['background']))
+        item_estado.setToolTip(config_estado['tooltip'])
+        
+        font = QFont()
+        font.setBold(True)
+        item_estado.setFont(font)
+        self.tabla.setItem(fila, 1, item_estado)
+        
+        # Columna 2: Resultado
+        item_resultado = QTableWidgetItem(resultado)
+        config_resultado = self._get_resultado_config(resultado)
+        item_resultado.setForeground(QColor(config_resultado['color']))
+        item_resultado.setBackground(QColor(config_resultado['background']))
+        item_resultado.setToolTip(config_resultado['tooltip'])
+        self.tabla.setItem(fila, 2, item_resultado)
+        
+        # Columna 3: Navegador
+        item_nav = QTableWidgetItem(nav)
+        item_nav.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        nav_num = self._extraer_numero_nav(nav)
+        if nav_num:
+            color = self._get_nav_color(nav_num)
+            item_nav.setForeground(QColor(color))
+            item_nav.setBackground(QColor("#f8f9fa"))
+            item_nav.setToolTip(f"Navegador {nav_num}")
+        self.tabla.setItem(fila, 3, item_nav)
+        
+        # Columna 4: Fecha
+        fecha_formateada = self._formatear_fecha(fecha)
+        item_fecha = QTableWidgetItem(fecha_formateada)
+        item_fecha.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item_fecha.setToolTip(f"Procesado: {fecha_formateada}")
+        self.tabla.setItem(fila, 4, item_fecha)
+
+    def _get_estado_config(self, estado):
+        """Configuración para columna estado"""
+        configs = {
+            "✅": {
+                'color': "#27ae60",
+                'background': "#e8f8f5",
+                'tooltip': "✅ Procesada exitosamente"
+            },
+            "📦": {
+                'color': "#f39c12",
+                'background': "#fff3cd",
+                'tooltip': "📦 Guía entregada (ENT)"
+            },
+            "❌": {
+                'color': "#e74c3c",
+                'background': "#fdeded",
+                'tooltip': "❌ Error en procesamiento"
+            },
+            "⚠️": {
+                'color': "#f39c12",
+                'background': "#fff3cd",
+                'tooltip': "⚠️ Advertencia - Verificar"
+            },
+            "⏭️": {
+                'color': "#7f8c8d",
+                'background': "#ecf0f1",
+                'tooltip': "⏭️ Omitida - Ya procesada"
+            }
+        }
+        
+        for key, config in configs.items():
+            if key in estado:
+                return config
+        
+        return {
+            'color': "#7f8c8d",
+            'background': "#ecf0f1",
+            'tooltip': "Estado desconocido"
+        }
+
+    def _get_resultado_config(self, resultado):
+        """Configuración para columna resultado"""
+        if "ENT" in resultado:
+            return {
+                'color': "#f39c12",
+                'background': "#fff3cd",
+                'tooltip': "📦 Guía con estado ENT"
+            }
+        elif "ADVERTENCIA" in resultado or "NO CONFIRMADO" in resultado:
+            return {
+                'color': "#f39c12",
+                'background': "#fff3cd",
+                'tooltip': "⚠️ Completado con advertencias"
+            }
+        elif "ERROR" in resultado:
+            return {
+                'color': "#e74c3c",
+                'background': "#fdeded",
+                'tooltip': "❌ Error en procesamiento"
+            }
+        elif "COMPLETADO" in resultado:
+            return {
+                'color': "#27ae60",
+                'background': "#e8f8f5",
+                'tooltip': "✅ Procesado correctamente"
+            }
+        elif "SIN RESULTADOS" in resultado:
+            return {
+                'color': "#e74c3c",
+                'background': "#fdeded",
+                'tooltip': "❌ Guía no encontrada"
+            }
+        
+        return {
+            'color': "#7f8c8d",
+            'background': "#ecf0f1",
+            'tooltip': resultado
+        }
+
+    def _calcular_estadisticas(self, datos):
+        """Calcula estadísticas de los datos"""
+        stats = {
+            'exitosas': 0,
+            'ent': 0,
+            'errores': 0,
+            'advertencias': 0,
+            'omitidas': 0
+        }
+        
+        for _, estado, _, _, _ in datos:
             if "✅" in estado:
-                item_estado.setForeground(QColor("#27ae60"))
+                stats['exitosas'] += 1
             elif "📦" in estado:
-                item_estado.setForeground(QColor("#f39c12"))
+                stats['ent'] += 1
             elif "❌" in estado:
-                item_estado.setForeground(QColor("#e74c3c"))
+                stats['errores'] += 1
             elif "⚠️" in estado:
-                item_estado.setForeground(QColor("#f39c12"))
-            self.tabla.setItem(i, 1, item_estado)
+                stats['advertencias'] += 1
+            elif "⏭️" in estado:
+                stats['omitidas'] += 1
+        
+        return stats
+
+    def _extraer_numero_nav(self, nav):
+        """Extrae número de navegador del string"""
+        import re
+        match = re.search(r'\d+', nav)
+        return int(match.group()) if match else None
+
+    def _get_nav_color(self, nav_num):
+        """Obtiene color según número de navegador"""
+        colors = {
+            1: "#3498db", 2: "#e74c3c", 3: "#27ae60",
+            4: "#f39c12", 5: "#9b59b6", 6: "#1abc9c"
+        }
+        return colors.get(nav_num, "#7f8c8d")
+
+    def _formatear_fecha(self, fecha):
+        """Formatea la fecha para mostrar"""
+        try:
+            if isinstance(fecha, str) and " " in fecha:
+                from datetime import datetime
+                fecha_obj = datetime.strptime(fecha, "%Y-%m-%d %H:%M:%S")
+                return fecha_obj.strftime("%d/%m/%Y %H:%M:%S")
+        except:
+            pass
+        return fecha
+
+    def _ajustar_columnas(self):
+        """Ajusta el ancho de las columnas"""
+        self.tabla.resizeColumnsToContents()
+        self.tabla.setColumnWidth(0, 150)  # Guía
+        self.tabla.setColumnWidth(1, 150)  # Estado
+        self.tabla.setColumnWidth(2, 200)  # Resultado
+        self.tabla.setColumnWidth(3, 100)  # Navegador
+        self.tabla.setColumnWidth(4, 150)  # Fecha
+
+    def copiar_guia(self, item):
+        """Copia la guía al portapapeles al hacer doble clic"""
+        if item.column() == 0:
+            guia = item.text()
+            QApplication.clipboard().setText(guia)
+            item.setSelected(True)
+            original_text = self.status_bar.text()
+            self.status_bar.setText(f"✅ Guía '{guia}' copiada al portapapeles")
+            QTimer.singleShot(3000, lambda: self.status_bar.setText(original_text if "Mostrando" in original_text else "Listo"))
+
+    def ordenar_por_columna(self, columna):
+        """Ordena por columna seleccionada"""
+        if not hasattr(self, 'datos_filtrados') or not self.datos_filtrados:
+            return
+        
+        if columna == self.columna_orden:
+            self.orden_ascendente = not self.orden_ascendente
+        else:
+            self.columna_orden = columna
+            self.orden_ascendente = True
+        
+        self.datos_filtrados.sort(key=lambda x: x[columna], reverse=not self.orden_ascendente)
+        self._actualizar_vista()
+        
+        orden = "ascendente" if self.orden_ascendente else "descendente"
+        self.status_bar.setText(f"📊 Ordenado por {self.tabla.horizontalHeaderItem(columna).text()} ({orden})")
+
+    def exportar_csv(self):
+        """Exporta el historial a CSV en la carpeta de Descargas"""
+        try:
+            from datetime import datetime
+            import os
             
-            item_resultado = QTableWidgetItem(resultado)
-            if "ENT" in resultado:
-                item_resultado.setForeground(QColor("#f39c12"))
-                item_resultado.setBackground(QColor("#fff3cd"))
-            elif "ADVERTENCIA" in resultado:
-                item_resultado.setForeground(QColor("#f39c12"))
-                item_resultado.setBackground(QColor("#fff3cd"))
-            elif "ERROR" in resultado:
-                item_resultado.setForeground(QColor("#e74c3c"))
-            self.tabla.setItem(i, 2, item_resultado)
+            if not hasattr(self, 'datos_filtrados') or not self.datos_filtrados:
+                QMessageBox.warning(self, "Advertencia", "No hay datos para exportar")
+                return
             
-            self.tabla.setItem(i, 3, QTableWidgetItem(nav))
-            self.tabla.setItem(i, 4, QTableWidgetItem(fecha))
+            # Generar nombre de archivo con timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filtro_text = self.filtro_actual.lower().replace(" ", "_") if self.filtro_actual != "Todos" else "completo"
+            nombre_archivo = f"historial_alertran_{filtro_text}_{timestamp}.csv"
+            
+            # Guardar en carpeta de Descargas
+            ruta_completa = self.carpeta_descargas / nombre_archivo
+            
+            # Asegurar nombre único
+            contador = 1
+            while ruta_completa.exists():
+                nombre_archivo = f"historial_alertran_{filtro_text}_{timestamp}_{contador}.csv"
+                ruta_completa = self.carpeta_descargas / nombre_archivo
+                contador += 1
+            
+            # Exportar a CSV
+            with open(ruta_completa, 'w', encoding='utf-8-sig') as f:
+                # Escribir encabezados
+                f.write("Guía,Estado,Resultado,Navegador,Fecha\n")
+                
+                # Escribir datos
+                for i in range(self.tabla.rowCount()):
+                    fila = [
+                        self.tabla.item(i, 0).text(),
+                        self.tabla.item(i, 1).text(),
+                        self.tabla.item(i, 2).text(),
+                        self.tabla.item(i, 3).text(),
+                        self.tabla.item(i, 4).text()
+                    ]
+                    # Escapar comillas si es necesario
+                    fila_escapada = [f'"{d.replace("\"", "\"\"")}"' for d in fila]
+                    f.write(','.join(fila_escapada) + '\n')
+            
+            # Mensaje de éxito con estadísticas
+            stats = self._calcular_estadisticas(self.datos_filtrados)
+            mensaje = (
+                f"✅ Archivo CSV exportado exitosamente!\n\n"
+                f"📁 Ubicación: {ruta_completa}\n"
+                f"📊 Registros: {self.tabla.rowCount()}\n\n"
+                f"📈 Resumen:\n"
+                f"   • Exitosas: {stats['exitosas']}\n"
+                f"   • ENT: {stats['ent']}\n"
+                f"   • Errores: {stats['errores']}\n"
+                f"   • Advertencias: {stats['advertencias']}"
+            )
+            
+            QMessageBox.information(self, "✅ Exportación Exitosa", mensaje)
+            
+            # Preguntar si quiere abrir la carpeta
+            reply = QMessageBox.question(
+                self, "📂 Abrir Carpeta",
+                "¿Desea abrir la carpeta donde se guardó el archivo?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                if os.name == 'nt':  # Windows
+                    os.startfile(self.carpeta_descargas)
+                else:  # macOS/Linux
+                    import subprocess
+                    subprocess.run(['open' if sys.platform == 'darwin' else 'xdg-open', str(self.carpeta_descargas)])
+            
+            self.status_bar.setText(f"✅ Exportado: {nombre_archivo}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "❌ Error", f"No se pudo exportar:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def exportar_excel(self):
+        """Exporta el historial a Excel en la carpeta de Descargas"""
+        try:
+            from datetime import datetime
+            import os
+            
+            if not hasattr(self, 'datos_filtrados') or not self.datos_filtrados:
+                QMessageBox.warning(self, "Advertencia", "No hay datos para exportar")
+                return
+            
+            # Generar nombre de archivo con timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filtro_text = self.filtro_actual.lower().replace(" ", "_") if self.filtro_actual != "Todos" else "completo"
+            nombre_archivo = f"historial_alertran_{filtro_text}_{timestamp}.xlsx"
+            
+            # Guardar en carpeta de Descargas
+            ruta_completa = self.carpeta_descargas / nombre_archivo
+            
+            # Asegurar nombre único
+            contador = 1
+            while ruta_completa.exists():
+                nombre_archivo = f"historial_alertran_{filtro_text}_{timestamp}_{contador}.xlsx"
+                ruta_completa = self.carpeta_descargas / nombre_archivo
+                contador += 1
+            
+            # Crear workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Historial Alertran"
+            
+            # Encabezados
+            headers = ["Guía", "Estado", "Resultado", "Navegador", "Fecha"]
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col)
+                cell.value = header
+                cell.font = Font(bold=True)
+            
+            # Datos
+            for row in range(self.tabla.rowCount()):
+                for col in range(self.tabla.columnCount()):
+                    item = self.tabla.item(row, col)
+                    if item:
+                        ws.cell(row=row + 2, column=col + 1, value=item.text())
+            
+            # Ajustar ancho de columnas
+            for col in ws.columns:
+                max_length = 0
+                column = col[0].column_letter
+                for cell in col:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = (max_length + 2)
+                ws.column_dimensions[column].width = min(adjusted_width, 50)
+            
+            # Guardar archivo
+            wb.save(ruta_completa)
+            
+            # Mensaje de éxito
+            QMessageBox.information(
+                self, "✅ Exportación Exitosa",
+                f"📊 Archivo Excel guardado en:\n{ruta_completa}\n\n"
+                f"📋 Registros: {self.tabla.rowCount()}"
+            )
+            
+            self.status_bar.setText(f"✅ Exportado: {nombre_archivo}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "❌ Error", f"No se pudo exportar a Excel:\n{str(e)}")
 
 
 # VENTANA DE LOGIN
@@ -1240,9 +1755,9 @@ class ProcesoThread(QThread):
         finally:
             loop.close()
 
-# =======================
+
 # VENTANA PRINCIPAL
-# =======================
+
 class VentanaPrincipal(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1545,7 +2060,7 @@ class VentanaPrincipal(QMainWindow):
         layout_principal.addLayout(layout_botones)
 
         # Versión
-        info_label = QLabel("🤖 V.7.3")
+        info_label = QLabel("🤖 V.8.0")
         info_label.setStyleSheet("color: #3498db; font-size: 9pt; font-weight: bold;")
         info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout_principal.addWidget(info_label)
@@ -1748,74 +2263,268 @@ class VentanaPrincipal(QMainWindow):
                 else:  # macOS/Linux
                     subprocess.run(['open' if sys.platform == 'darwin' else 'xdg-open', str(self.carpeta_descargas)])
 
+    # ========== MÉTODO INICIAR PROCESO ==========
     def iniciar_proceso(self):
-        if not all([self.sesion_activa, self.ampliacion_input.text(), self.excel_path]):
-            QMessageBox.warning(self, "Error", "Complete todos los campos")
+        """Inicia el proceso de creación de desviaciones"""
+        # Validaciones específicas con mensajes claros
+        if not self.sesion_activa:
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("🔒 Sesión no iniciada")
+            msg.setText("<b>Debe iniciar sesión para continuar</b>")
+            msg.setInformativeText("Por favor, inicie sesión en la pestaña 'Login' antes de procesar guías.")
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg.exec()
+            return
+        
+        if not self.ampliacion_input.text().strip():
+            self.ampliacion_input.setStyleSheet("border: 2px solid red;")
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("📝 Campo requerido")
+            msg.setText("<b>El campo de ampliación está vacío</b>")
+            msg.setInformativeText("Por favor, ingrese el número de ampliación antes de continuar.")
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg.exec()
+            self.ampliacion_input.setFocus()
+            return
+        else:
+            self.ampliacion_input.setStyleSheet("")
+        
+        if not self.excel_path:
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("📊 Archivo requerido")
+            msg.setText("<b>No se ha seleccionado ningún archivo</b>")
+            msg.setInformativeText("Debe seleccionar un archivo Excel con las guías a procesar.")
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg.exec()
             return
 
         num_nav = self.num_navegadores_spin.value()
         
-        reply = QMessageBox.question(
-            self, "🔔 CONFIRMAR PROCESO",
-            f"📊 **DETALLES DE LA OPERACIÓN**\n\n"
-            f"🌐 Navegadores: {num_nav}\n"
-            f"👤 Usuario: {self.usuario_actual}\n"
-            f"📋 Total guías: {self.total_guias}\n"
-            f"📍 Regional: {self.ciudad_combo.currentText()}\n"
-            f"📌 Desviación: {self.tipo_combo.currentText()}\n\n"
-            f"📁 Los archivos se guardarán en:\n{self.carpeta_descargas}\n\n"
-            f"¿Desea continuar?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
+        # Crear mensaje de confirmación simple con HTML
+        mensaje = self._crear_mensaje_confirmacion_simple(num_nav)
         
-        if reply == QMessageBox.StandardButton.No:
-            return
+        # Diálogo de confirmación
+        reply = QMessageBox(self)
+        reply.setWindowTitle("🔔 CONFIRMAR PROCESO")
+        reply.setText(mensaje)
+        reply.setIcon(QMessageBox.Icon.Question)
+        
+        # Personalizar botones
+        btn_si = reply.addButton("✅ SÍ, INICIAR", QMessageBox.ButtonRole.YesRole)
+        btn_no = reply.addButton("❌ NO, CANCELAR", QMessageBox.ButtonRole.NoRole)
+        reply.setDefaultButton(btn_no)
+        
+        # Estilo mejorado para ventana más pequeña y redimensionable
+        reply.setStyleSheet("""
+            QMessageBox {
+                background-color: #1a1a1a;
+            }
+            QMessageBox QLabel {
+                color: #ffffff;
+                font-size: 10pt;
+                min-width: 400px;
+                max-width: 600px;
+                padding: 15px;
+                background-color: #1a1a1a;
+            }
+            QPushButton {
+                padding: 8px 20px;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                font-size: 10pt;
+                margin: 8px;
+                min-width: 120px;
+            }
+            QPushButton[text="✅ SÍ, INICIAR"] {
+                background-color: #4CAF50;
+                color: white;
+            }
+            QPushButton[text="✅ SÍ, INICIAR"]:hover {
+                background-color: #45a049;
+            }
+            QPushButton[text="❌ NO, CANCELAR"] {
+                background-color: #f44336;
+                color: white;
+            }
+            QPushButton[text="❌ NO, CANCELAR"]:hover {
+                background-color: #da190b;
+            }
+        """)
+        
+        # Configurar tamaño inicial más pequeño
+        reply.resize(450, 400)
+        
+        # Mostrar y centrar manualmente
+        reply.show()
+        
+        # Obtener la geometría de la ventana principal
+        parent_geo = self.geometry()
+        dialog_geo = reply.geometry()
+        
+        # Calcular la posición centrada
+        x = parent_geo.x() + (parent_geo.width() - dialog_geo.width()) // 2
+        y = parent_geo.y() + (parent_geo.height() - dialog_geo.height()) // 2
+        
+        # Mover el diálogo a la posición centrada
+        reply.move(x, y)
+        
+        # Hacer redimensionable
+        reply.setSizeGripEnabled(True)
+        
+        # Permitir maximizar y minimizar
+        reply.setWindowFlags(reply.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowMinimizeButtonHint)
+        
+        reply.exec()
+        
+        if reply.clickedButton() == btn_si:
+            # Resetear contadores
+            self.tiempo_inicio = datetime.now()
+            self.guias_ent = []
+            self.guias_error_count = 0
+            self.guias_advertencia_count = 0
+            self.desviaciones_creadas = 0
 
-        # Resetear contadores
-        self.tiempo_inicio = datetime.now()
-        self.guias_ent = []
-        self.guias_error_count = 0
-        self.guias_advertencia_count = 0
-        self.desviaciones_creadas = 0
+            self.btn_iniciar.setEnabled(False)
+            self.btn_cancelar.setEnabled(True)
+            self.btn_cargar_excel.setEnabled(False)
+            self.btn_errores.setEnabled(False)
+            self.btn_login.setEnabled(False)
+            self.btn_logout.setEnabled(False)
+            self.num_navegadores_spin.setEnabled(False)
+            self.progress_bar.setValue(0)
+            self.lbl_tiempo_restante.setText("⏱️ Calculando tiempo restante...")
+            self.log_text.clear()
+            self.historial_datos.clear()
 
-        self.btn_iniciar.setEnabled(False)
-        self.btn_cancelar.setEnabled(True)
-        self.btn_cargar_excel.setEnabled(False)
-        self.btn_errores.setEnabled(False)
-        self.btn_login.setEnabled(False)
-        self.btn_logout.setEnabled(False)
-        self.num_navegadores_spin.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.lbl_tiempo_restante.setText("⏱️ Calculando tiempo restante...")
-        self.log_text.clear()
-        self.historial_datos.clear()
+            self.log(f"🚀 Iniciando con {num_nav} navegador(es)...")
+            self.log(f"👤 Usuario: {self.usuario_actual}")
+            self.log(f"📊 Total guías a procesar: {self.total_guias}")
+            self.log(f"📁 Los archivos se guardarán en: {self.carpeta_descargas}")
 
-        self.log(f"🚀 Iniciando con {num_nav} navegador(es)...")
-        self.log(f"👤 Usuario: {self.usuario_actual}")
-        self.log(f"📊 Total guías a procesar: {self.total_guias}")
-        self.log(f"📁 Los archivos se guardarán en: {self.carpeta_descargas}")
+            self.proceso_thread = ProcesoThread(
+                self.usuario_actual,
+                self.password_actual,
+                self.ciudad_combo.currentText(),
+                self.tipo_combo.currentText(),
+                self.ampliacion_input.text(),
+                self.excel_path,
+                num_nav
+            )
 
-        self.proceso_thread = ProcesoThread(
-            self.usuario_actual,
-            self.password_actual,
-            self.ciudad_combo.currentText(),
-            self.tipo_combo.currentText(),
-            self.ampliacion_input.text(),
-            self.excel_path,
-            num_nav
-        )
+            self.proceso_thread.senales.progreso.connect(self.progress_bar.setValue)
+            self.proceso_thread.senales.estado.connect(self.lbl_estado.setText)
+            self.proceso_thread.senales.log.connect(self.log)
+            self.proceso_thread.senales.error.connect(self.mostrar_error)
+            self.proceso_thread.senales.finalizado.connect(self.proceso_finalizado)
+            self.proceso_thread.senales.archivo_errores.connect(self.archivo_errores_generado)
+            self.proceso_thread.senales.guia_procesada.connect(self.agregar_al_historial)
+            self.proceso_thread.senales.proceso_cancelado.connect(self.proceso_cancelado)
+            self.proceso_thread.senales.tiempo_restante.connect(self.actualizar_tiempo_restante)
 
-        self.proceso_thread.senales.progreso.connect(self.progress_bar.setValue)
-        self.proceso_thread.senales.estado.connect(self.lbl_estado.setText)
-        self.proceso_thread.senales.log.connect(self.log)
-        self.proceso_thread.senales.error.connect(self.mostrar_error)
-        self.proceso_thread.senales.finalizado.connect(self.proceso_finalizado)
-        self.proceso_thread.senales.archivo_errores.connect(self.archivo_errores_generado)
-        self.proceso_thread.senales.guia_procesada.connect(self.agregar_al_historial)
-        self.proceso_thread.senales.proceso_cancelado.connect(self.proceso_cancelado)
-        self.proceso_thread.senales.tiempo_restante.connect(self.actualizar_tiempo_restante)
+            self.proceso_thread.start()
 
-        self.proceso_thread.start()
+    def _crear_mensaje_confirmacion_simple(self, num_nav):
+        """Crea un mensaje de confirmación simple con HTML centrado - VERSIÓN COMPACTA"""
+        
+        # Determinar color según cantidad de guías
+        if self.total_guias < 50:
+            color_guias = "#4CAF50"
+            emoji_guias = "✅"
+        elif self.total_guias < 100:
+            color_guias = "#FF9800"
+            emoji_guias = "⚠️"
+        else:
+            color_guias = "#f44336"
+            emoji_guias = "🔴"
+        
+        # Mensaje HTML centrado con mejor estructura - VERSIÓN COMPACTA
+        mensaje = f"""
+        <div style="font-family: Arial; text-align: center; color: white; width: 100%;">
+            <h3 style="color: #ffffff; margin: 0 0 15px 0; padding: 0; font-size: 14pt;">📋 RESUMEN DE OPERACIÓN</h3>
+            
+            <div style="display: flex; justify-content: center; width: 100%;">
+                <table style="width: 95%; margin: 0 auto; border-collapse: collapse; text-align: left; font-size: 9pt;">
+                    <tr>
+                        <td style="padding: 6px; background: #333; border-radius: 5px 0 0 5px; width: 40%;">🌐 <b>Navegadores:</b></td>
+                        <td style="padding: 6px; background: #2d2d2d; border-radius: 0 5px 5px 0;">{num_nav} simultáneos</td>
+                    </tr>
+                    <tr><td colspan="2" style="height: 3px;"></td></tr>
+                    <tr>
+                        <td style="padding: 6px; background: #333; border-radius: 5px 0 0 5px;">👤 <b>Usuario:</b></td>
+                        <td style="padding: 6px; background: #2d2d2d; border-radius: 0 5px 5px 0;">{self.usuario_actual}</td>
+                    </tr>
+                    <tr><td colspan="2" style="height: 3px;"></td></tr>
+                    <tr>
+                        <td style="padding: 6px; background: #333; border-radius: 5px 0 0 5px;">📋 <b>Total guías:</b></td>
+                        <td style="padding: 6px; background: #2d2d2d; border-radius: 0 5px 5px 0;">
+                            <span style="background: {color_guias}; color: white; padding: 3px 12px; border-radius: 15px; display: inline-block; font-size: 9pt;">{emoji_guias} {self.total_guias}</span>
+                        </td>
+                    </tr>
+                    <tr><td colspan="2" style="height: 3px;"></td></tr>
+                    <tr>
+                        <td style="padding: 6px; background: #333; border-radius: 5px 0 0 5px;">📍 <b>Regional:</b></td>
+                        <td style="padding: 6px; background: #2d2d2d; border-radius: 0 5px 5px 0;">{self.ciudad_combo.currentText()}</td>
+                    </tr>
+                    <tr><td colspan="2" style="height: 3px;"></td></tr>
+                    <tr>
+                        <td style="padding: 6px; background: #333; border-radius: 5px 0 0 5px;">📌 <b>Desviación:</b></td>
+                        <td style="padding: 6px; background: #2d2d2d; border-radius: 0 5px 5px 0;">{self.tipo_combo.currentText()}</td>
+                    </tr>
+                </table>
+            </div>
+            
+            <div style="background: #2a2a2a; padding: 8px; border-radius: 5px; margin: 12px auto; width: 95%; text-align: center; font-size: 9pt;">
+                <p style="margin: 3px 0;"><span style="font-size: 1.1em;">📝</span> <b>Ampliación N°:</b> {self.ampliacion_input.text().strip()}</p>
+            </div>
+            
+            <div style="background: #2a2a2a; padding: 8px; border-radius: 5px; margin: 12px auto; width: 95%; text-align: center; font-size: 9pt;">
+                <p style="margin: 3px 0;"><span style="font-size: 1.1em;">📂</span> <b>UBICACIÓN:</b></p>
+                <p style="font-family: monospace; background: #1a1a1a; padding: 6px; border-radius: 5px; word-break: break-all; margin: 5px 0 0 0; font-size: 8pt;">
+                    {self.carpeta_descargas}
+                </p>
+            </div>
+            
+            <div style="background: #2a2a2a; padding: 8px; border-radius: 5px; margin: 12px auto; width: 95%; text-align: center; font-size: 9pt;">
+                <p style="margin: 3px 0;"><span style="font-size: 1.1em;">⏱️</span> <b>Tiempo estimado:</b> {self._calcular_tiempo_estimado_texto(num_nav)}</p>
+            </div>
+        """
+        
+        # Advertencia si hay muchas guías - VERSIÓN COMPACTA
+        if self.total_guias > 50:
+            mensaje += f"""
+            <div style="background: #331111; padding: 8px; border-radius: 5px; margin: 12px auto; width: 95%; border: 1px solid #ff4444; text-align: center; font-size: 9pt;">
+                <p style="margin: 3px 0;"><span style="font-size: 1.3em; color: #ff4444;">⚠️</span> <b style="color: #ff4444;">PROCESO EXTENSO</b></p>
+                <p style="color: #ff8888; margin: 5px 0 0 0;">{self.total_guias} guías con {num_nav} navegador(es).<br>
+                Espere sin interrumpir.</p>
+            </div>
+            """
+        
+        mensaje += """
+            <div style="margin-top: 15px; padding-top: 10px; border-top: 1px dashed #667eea; width: 100%; text-align: center;">
+                <p style="font-size: 10pt; margin: 8px 0;"><b>¿Desea continuar con el proceso?</b></p>
+            </div>
+        </div>
+        """
+        
+        return mensaje
+
+    def _calcular_tiempo_estimado_texto(self, num_nav):
+        """Calcula el tiempo estimado en texto formateado"""
+        # Estimación: 5 segundos por guía por navegador
+        segundos_totales = (self.total_guias * 5) / max(num_nav, 1)
+        
+        if segundos_totales < 60:
+            return f"{segundos_totales:.0f} segundos"
+        elif segundos_totales < 3600:
+            minutos = segundos_totales / 60
+            return f"{minutos:.1f} minutos"
+        else:
+            horas = segundos_totales / 3600
+            return f"{horas:.1f} horas"
 
     def cancelar_proceso(self):
         """Cancela el proceso en ejecución"""
